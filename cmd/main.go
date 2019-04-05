@@ -1,9 +1,8 @@
 package main
 
 import (
-	"encoding/json"
+	"database/sql"
 	"fmt"
-	"killbot/pkg/discord"
 	"killbot/pkg/esi"
 	"killbot/pkg/zkb"
 	"log"
@@ -15,43 +14,51 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gorilla/websocket"
+	_ "github.com/lib/pq"
 	"golang.org/x/text/language"
 	"golang.org/x/text/message"
+
+	"github.com/bwmarrin/discordgo"
 )
 
 var (
-	httpClient     *http.Client
-	discordAPI     *discord.Discord
-	esiAPI         *esi.Esi
-	redisQueue     *zkb.Redisq
-	webhook        string
-	allianceEnv    int32
-	corporationEnv int32
+	httpClient *http.Client
+	esiClient  *esi.Client
+	zkbClient  *zkb.Client
+	discord    *discordgo.Session
+	postgres   *sql.DB
+
+	queueID      string
+	botToken     string
+	killsChannel string
+	intelChannel string
+	alliance     uint32
+	corporation  uint32
+
+	psqlInfo string
 )
 
-func isCorpOrAlliance(AllianceID int32, CorporationID int32) bool {
-
-	if allianceEnv != 0 && AllianceID == allianceEnv {
+func isCorpOrAlliance(CorporationID uint32, AllianceID uint32) bool {
+	if alliance != 0 && AllianceID == alliance {
 		return true
 	}
 
-	if CorporationID == corporationEnv {
+	if CorporationID == corporation {
 		return true
 	}
 
 	return false
 }
 
-func getIds(killMail *esi.KillMail) ([]int32, int32, []int32, bool, bool) {
-	var finalBlowID int32
+func getIds(killMail *esi.KillMail) ([]uint32, uint32, []uint32, bool, bool) {
+	var finalBlowID uint32
 
 	isAttacker := false
-	isVictim := isCorpOrAlliance(killMail.Victim.AllianceID, killMail.Victim.CorporationID)
+	isVictim := isCorpOrAlliance(killMail.Victim.CorporationID, killMail.Victim.AllianceID)
 
-	unique := make(map[int32]struct{})
+	unique := make(map[uint32]struct{})
 	unique[killMail.Victim.ID] = struct{}{}
-	unique[killMail.SolarSystemID] = struct{}{}
+	unique[killMail.SystemID] = struct{}{}
 	unique[killMail.Victim.ShipTypeID] = struct{}{}
 	unique[killMail.Victim.CorporationID] = struct{}{}
 
@@ -59,9 +66,9 @@ func getIds(killMail *esi.KillMail) ([]int32, int32, []int32, bool, bool) {
 		unique[killMail.Victim.AllianceID] = struct{}{}
 	}
 
-	friendlies := []int32{}
+	friendlies := []uint32{}
 	for _, attacker := range killMail.Attackers {
-		isFriendly := isCorpOrAlliance(attacker.AllianceID, attacker.CorporationID)
+		isFriendly := isCorpOrAlliance(attacker.CorporationID, attacker.AllianceID)
 
 		if isFriendly == true {
 			friendlies = append(friendlies, attacker.ID)
@@ -92,7 +99,7 @@ func getIds(killMail *esi.KillMail) ([]int32, int32, []int32, bool, bool) {
 		}
 	}
 
-	ids := []int32{}
+	ids := []uint32{}
 	for key := range unique {
 		ids = append(ids[:], key)
 	}
@@ -100,77 +107,54 @@ func getIds(killMail *esi.KillMail) ([]int32, int32, []int32, bool, bool) {
 	return ids, finalBlowID, friendlies, isAttacker, isVictim
 }
 
-func getKillMailNames(killMail *esi.KillMail, ids []int32) map[int32]esi.NameRef {
-	references := map[int32]esi.NameRef{}
-
-	buffer, error := json.Marshal(ids)
-	if error != nil {
-		log.Println("Unable serialize list of ids: ", error)
-	}
-
-	names, error := esiAPI.UniverseNames(buffer)
-	if error != nil {
-		log.Println("Unable to get names from killmail: ", error)
-	}
-
-	for _, ref := range names {
-		references[ref.ID] = ref
-	}
-
-	return references
-}
-
-func buildAttachment(killMail *esi.KillMail, names map[int32]esi.NameRef, finalBlowID int32, totalValue float64, friendlies []int32, isAttacker bool, isVictim bool) discord.Attachment {
-	var embeds []discord.Embed
-	var fields []discord.Field
-
+func buildDiscordMessage(killMail *esi.KillMail, names map[uint32]esi.NameRef, finalBlowID uint32, totalValue float64, friendlies []uint32, isAttacker bool, isVictim bool) *discordgo.MessageSend {
 	printer := message.NewPrinter(language.English)
 
-	embed := discord.Embed{}
-	embed.Color = 6710886
+	message := &discordgo.MessageSend{
+		Embed: &discordgo.MessageEmbed{
+			Title:     fmt.Sprintf("%s killed %s (%s)", names[finalBlowID].Name, names[killMail.Victim.ID].Name, names[killMail.Victim.CorporationID].Name),
+			URL:       fmt.Sprintf("https://zkillboard.com/kill/%d", killMail.ID),
+			Timestamp: killMail.Time,
+			Color:     6710886,
+			Thumbnail: &discordgo.MessageEmbedThumbnail{
+				URL: fmt.Sprintf("https://imageserver.eveonline.com/Render/%d_128.png", killMail.Victim.ShipTypeID),
+			},
+			Fields: []*discordgo.MessageEmbedField{
+				&discordgo.MessageEmbedField{
+					Name:   "Ship",
+					Value:  fmt.Sprintf("[%s](https://zkillboard.com/ship/%d)", names[killMail.Victim.ShipTypeID].Name, killMail.Victim.ShipTypeID),
+					Inline: true,
+				},
+				&discordgo.MessageEmbedField{
+					Name:   "System",
+					Value:  fmt.Sprintf("[%s](https://zkillboard.com/system/%d)", names[killMail.SystemID].Name, killMail.SystemID),
+					Inline: true,
+				},
+				&discordgo.MessageEmbedField{
+					Name:   "Pilots Involved",
+					Value:  fmt.Sprintf("%d", len(killMail.Attackers)),
+					Inline: true,
+				},
+				&discordgo.MessageEmbedField{
+					Name:   "Value",
+					Value:  printer.Sprintf("%.2f ISK", totalValue),
+					Inline: true,
+				},
+			},
+		},
+	}
 
 	if isAttacker == true {
-		embed.Color = 8103679
+		message.Embed.Color = 8103679
 	}
 
 	if isVictim == true {
-		embed.Color = 16711680
+		message.Embed.Color = 16711680
 	}
 
 	if isVictim == true && isAttacker == true {
-		embed.Color = 6570404
+		message.Embed.Color = 6570404
 	}
-
-	embed.Title = fmt.Sprintf("%s killed %s (%s)", names[finalBlowID].Name, names[killMail.Victim.ID].Name, names[killMail.Victim.CorporationID].Name)
-	embed.URL = fmt.Sprintf("https://zkillboard.com/kill/%d", killMail.KillmailID)
-	embed.Timestamp = killMail.KillmailTime
-	embed.Thumbnail = discord.Image{
-		URL: fmt.Sprintf("https://imageserver.eveonline.com/Render/%d_128.png", killMail.Victim.ShipTypeID),
-	}
-
-	fields = append(fields, discord.Field{
-		Name:   "Ship",
-		Value:  fmt.Sprintf("[%s](https://zkillboard.com/ship/%d)", names[killMail.Victim.ShipTypeID].Name, killMail.Victim.ShipTypeID),
-		Inline: true,
-	})
-
-	fields = append(fields, discord.Field{
-		Name:   "System",
-		Value:  fmt.Sprintf("[%s](https://zkillboard.com/system/%d)", names[killMail.SolarSystemID].Name, killMail.SolarSystemID),
-		Inline: true,
-	})
-
-	fields = append(fields, discord.Field{
-		Name:   "Pilots Involved",
-		Value:  fmt.Sprintf("%d", len(killMail.Attackers)),
-		Inline: true,
-	})
-
-	fields = append(fields, discord.Field{
-		Name:   "Value",
-		Value:  printer.Sprintf("%.2f ISK", totalValue),
-		Inline: true,
-	})
 
 	if len(friendlies) > 0 {
 		var members []string
@@ -179,92 +163,176 @@ func buildAttachment(killMail *esi.KillMail, names map[int32]esi.NameRef, finalB
 			members = append(members, fmt.Sprintf("[%s](https://zkillboard.com/character/%d/)", names[id].Name, id))
 		}
 
-		fields = append(fields, discord.Field{
+		message.Embed.Fields = append(message.Embed.Fields, &discordgo.MessageEmbedField{
 			Name:   "Friendly Pilots Involved",
 			Value:  strings.Join(members, ", "),
 			Inline: false,
 		})
 	}
 
-	embed.Fields = fields
-	attachment := discord.Attachment{Username: "Concord Alerts", Embeds: append(embeds, embed)}
-
 	if totalValue > 3000000000 && len(friendlies) > 3 {
-		attachment.Content = "WOAH! Look at that kill @everyone"
+		message.Content = "WOAH! Look at that kill @everyone"
 	}
 
-	return attachment
+	return message
 }
 
-func processKillMail(zkill zkb.Zkb) {
-	killMail, error := esiAPI.Killmail(zkill.Href)
+func processKillMail(redis *zkb.RedisResponse) {
+	killMail, _, error := esiClient.GetKillMail(redis.ID, redis.Zkb.Hash, false)
 	if error != nil {
 		log.Println("Error pulling killmail from esi: ", error)
 		return
 	}
 
 	ids, finalBlowID, friendlies, isAttacker, isVictim := getIds(killMail)
-	// log.Println(fmt.Sprintf("Processing Kill %d", killMail.KillmailID))
 
 	if isVictim == true || isAttacker == true {
-		names := getKillMailNames(killMail, ids)
-		attachment := buildAttachment(killMail, names, finalBlowID, zkill.TotalValue, friendlies, isAttacker, isVictim)
-
-		buffer, error := json.Marshal(attachment)
+		names, error := esiClient.GetNames(ids)
 		if error != nil {
-			log.Println("Unable serialize the discord attachment: ", error)
-			return
+			log.Println("Error getting names from esi: ", error)
 		}
 
-		discordAPI.PushWebhook(webhook, buffer)
+		message := buildDiscordMessage(killMail, names, finalBlowID, redis.Zkb.TotalValue, friendlies, isAttacker, isVictim)
+
+		sendKillMailMessage(killsChannel, message)
+		return
+	}
+
+	query := fmt.Sprintf(
+		"SELECT systems.id, systems.identifier, systems.name as system_name, systems.map_id, maps.name as map_name, systems.status FROM systems JOIN maps ON maps.id = systems.map_id WHERE maps.owner_id = %d AND systems.id = %d;",
+		alliance,
+		killMail.SystemID,
+	)
+
+	row := postgres.QueryRow(query)
+	switch error := row.Scan(); error {
+	case sql.ErrNoRows:
+		log.Println(fmt.Sprintf("System %d not on any available chains", killMail.SystemID))
+	case nil:
+		names, error := esiClient.GetNames(ids)
+		if error != nil {
+			log.Println("Error getting names from esi: ", error)
+		}
+
+		message := buildDiscordMessage(killMail, names, finalBlowID, redis.Zkb.TotalValue, friendlies, isAttacker, isVictim)
+
+		sendKillMailMessage(intelChannel, message)
+		return
+	default:
+		panic(error)
+	}
+}
+
+func sendKillMailMessage(channelID string, message *discordgo.MessageSend) {
+	_, error := discord.ChannelMessageSendComplex(channelID, message)
+	if error != nil {
+		log.Println(fmt.Sprintf("Message send to %s failed: ", channelID), error)
+		time.Sleep(5 * time.Second)
+		sendKillMailMessage(channelID, message)
 	}
 }
 
 func setupEnv() bool {
-	webhook = os.Getenv("WEBHOOK")
+	queueID = strings.Trim(os.Getenv("REDISQ_ID"), " ")
+	if queueID == "" {
+		log.Println("Environment variable 'REDISQ_ID' requires a value, if you want to continue progress where you left off in the kills queue")
+	}
 
-	alliance, error := strconv.ParseInt(os.Getenv("ALLIANCE_ID"), 10, 32)
+	botToken = strings.Trim(os.Getenv("BOT_TOKEN"), " ")
+	if botToken == "" {
+		log.Fatal("Environment variable 'BOT_TOKEN' requires a value to be able to push messages to discord")
+	}
+
+	killsChannel = strings.Trim(os.Getenv("KILLS_CHANNEL_ID"), " ")
+	intelChannel = strings.Trim(os.Getenv("INTEL_CHANNEL_ID"), " ")
+	if killsChannel == "" && intelChannel == "" {
+		log.Fatal("Either the `KILLS_CHANNEL_ID` or the `INTEL_CHANNEL_ID` need to be set, or the bot will do nothing")
+	}
+	if killsChannel == "" {
+		log.Println("Environment variable 'KILLS_CHANNEL_ID' requires a value if you want a stream of kills your alliance/corp are related to")
+	}
+	if intelChannel == "" {
+		log.Println("Environment variable 'INTEL_CHANNEL_ID' requires a value if you want to get a stream of kills that you aren't related to, and are in chain")
+	}
+
+	host := strings.Trim(os.Getenv("POSTGRES_HOST"), " ")
+	if host == "" {
+		log.Fatal("Environment variable `POSTGRES_HOST` is required to connect to the systems database")
+	}
+
+	user := strings.Trim(os.Getenv("POSTGRES_USER"), " ")
+	if user == "" {
+		log.Fatal("Environment variable `POSTGRES_USER` is required to connect to the systems database")
+	}
+
+	port := strings.Trim(os.Getenv("POSTGRES_PORT"), " ")
+	if port == "" {
+		log.Fatal("Environment variable `POSTGRES_PORT` is required to connect to the systems database")
+	}
+
+	dbname := strings.Trim(os.Getenv("POSTGRES_DB"), " ")
+	if dbname == "" {
+		log.Fatal("Environment variable `POSTGRES_DB` is required to connect to the systems database")
+	}
+
+	password := strings.Trim(os.Getenv("POSTGRES_PASSWORD"), " ")
+	if password == "" {
+		log.Fatal("Environment variable `POSTGRES_PASSWORD` is required to connect to the systems database")
+	}
+
+	psqlInfo = fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		host, port, user, password, dbname)
+
+	allianceID, error := strconv.ParseUint(os.Getenv("ALLIANCE_ID"), 10, 32)
 	if error != nil {
 		log.Fatal("Environment variable 'ALLIANCE_ID' wasn't set correctly (or at all)")
 	}
 
-	corporation, error := strconv.ParseInt(os.Getenv("CORPORATION_ID"), 10, 32)
+	corporationID, error := strconv.ParseUint(os.Getenv("CORPORATION_ID"), 10, 32)
 	if error != nil {
-		log.Fatal("Environment Variable 'CORPORATION_ID' is required!")
+		log.Fatal("Environment Variable 'CORPORATION_ID' wasn't set correctly (or at all)")
 	}
 
-	allianceEnv = int32(alliance)
-	corporationEnv = int32(corporation)
-
-	// exporter, error := stackdriver.NewExporter(stackdriver.Options{ProjectID: os.Getenv("PROJECT_ID")})
-	// if error != nil {
-	// 	log.Fatal(error)
-	// }
-
-	// view.RegisterExporter(exporter)
-
-	// error = view.Register(ochttp.ClientLatencyView, ochttp.ClientResponseBytesView)
-	// if error != nil {
-	// 	log.Fatal(error)
-	// }
-
-	// trace.RegisterExporter(exporter)
+	alliance = uint32(allianceID)
+	corporation = uint32(corporationID)
 
 	return true
 }
 
 func main() {
+	var error error
 	isReady := setupEnv()
 
 	if isReady == true {
-		httpClient = &http.Client{
-			// Transport: &ochttp.Transport{
-			// 	Propagation: &propagation.HTTPFormat{},
-			// },
+		httpClient = &http.Client{}
+		esiClient = esi.CreateClient(httpClient)
+		zkbClient = zkb.CreateClient(httpClient)
+
+		log.Println(alliance)
+		log.Println(corporation)
+		log.Println(psqlInfo)
+		log.Println(botToken)
+		log.Println(killsChannel)
+		log.Println(intelChannel)
+
+		postgres, error = sql.Open("postgres", psqlInfo)
+		if error != nil {
+			panic(error)
 		}
-		esiAPI = esi.NewAPI(httpClient)
-		discordAPI = discord.NewAPI(httpClient)
-		redisQueue = zkb.NewAPI(httpClient)
+
+		defer postgres.Close()
+
+		discord, error = discordgo.New("Bot " + botToken)
+		if error != nil {
+			log.Fatal("discordgo: ", error)
+		}
+
+		error = discord.Open()
+		if error != nil {
+			log.Fatal("discordgo: ", error)
+		}
+
+		defer discord.Close()
 
 		getKillmails()
 	}
@@ -279,78 +347,12 @@ func getKillmails() {
 	log.Println("Concord Alerts have started processing!")
 
 	for {
-		bundle, error := redisQueue.GetItem("chingy-killbot-discord")
-		if error != nil || bundle.KillID == 0 {
+		bundle, error := zkbClient.GetRedisItem(queueID)
+		if error != nil || bundle.ID == 0 {
 			time.Sleep(5 * time.Second)
 			continue
 		}
 
-		go processKillMail(bundle.ZKB)
-	}
-}
-
-func connectWebsocket() {
-	streamSub := []byte("{\"action\":\"sub\",\"channel\":\"killstream\"}")
-
-	socket, _, error := websocket.DefaultDialer.Dial("wss://zkillboard.com:2096", nil)
-	if error != nil {
-		log.Println("Error opening websocket to zkillboard: ", error)
-	}
-
-	log.Println("Concord Alerts have started processing!")
-
-	defer socket.Close()
-
-	done := make(chan struct{})
-
-	socket.WriteMessage(websocket.TextMessage, streamSub)
-
-	zkillChannel := make(chan []byte)
-	go readZkillMessage(socket, zkillChannel, done)
-
-	ticker := time.NewTicker(10 * time.Minute)
-	defer ticker.Stop()
-
-	for {
-
-		select {
-
-		case <-done:
-			return
-
-		case tick := <-ticker.C:
-			log.Println(fmt.Sprintf("%s: Keep Alive Subscription", tick.String()))
-
-			error := socket.WriteMessage(websocket.TextMessage, []byte(""))
-			if error != nil {
-				log.Println("KeepAlive error: ", error)
-				return
-			}
-
-		case message := <-zkillChannel:
-			var bundle zkb.Bundle
-			error = json.Unmarshal(message, &bundle)
-			if error != nil {
-				log.Println(message)
-				break
-			}
-
-			go processKillMail(bundle.ZKB)
-		}
-
-	}
-}
-
-func readZkillMessage(socket *websocket.Conn, zkillChannel chan []byte, done chan struct{}) {
-	for {
-		defer close(done)
-
-		_, message, error := socket.ReadMessage()
-		if error != nil {
-			log.Println("Error receiving message: ", error)
-			return
-		}
-
-		zkillChannel <- message
+		go processKillMail(bundle)
 	}
 }

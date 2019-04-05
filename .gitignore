@@ -10,3 +10,6 @@
 *.out
 
 .vscode/
+key.json
+deployment.yaml
+deployment.yaml
