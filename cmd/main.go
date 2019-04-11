@@ -142,13 +142,13 @@ func buildDiscordMessage(killMail *esi.KillMail, names map[uint32]esi.NameRef, f
 					Inline: true,
 				},
 				&discordgo.MessageEmbedField{
-					Name:   "Victim",
-					Value:  fmt.Sprintf("[%s](https://zkillboard.com/character/%d)", names[killMail.Victim.ID].Name, killMail.Victim.ID),
+					Name:   "Corporation",
+					Value:  fmt.Sprintf("[%s](https://zkillboard.com/corporation/%d)", names[hostileCorpID].Name, hostileCorpID),
 					Inline: true,
 				},
 				&discordgo.MessageEmbedField{
-					Name:   "Corporation",
-					Value:  fmt.Sprintf("[%s](https://zkillboard.com/corporation/%d)", names[hostileCorpID].Name, hostileCorpID),
+					Name:   "Victim",
+					Value:  fmt.Sprintf("[%s](https://zkillboard.com/character/%d)", names[killMail.Victim.ID].Name, killMail.Victim.ID),
 					Inline: true,
 				},
 				&discordgo.MessageEmbedField{
