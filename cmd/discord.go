@@ -1,8 +1,8 @@
 package main
 
 import (
+	"esi"
 	"fmt"
-	"killbot/pkg/esi"
 	"log"
 	"strings"
 	"time"

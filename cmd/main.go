@@ -2,9 +2,8 @@ package main
 
 import (
 	"database/sql"
+	"esi"
 	"fmt"
-	"killbot/pkg/esi"
-	"killbot/pkg/zkb"
 	"log"
 	"net/http"
 	"os"
@@ -12,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"zkb"
 
 	_ "github.com/GoogleCloudPlatform/cloudsql-proxy/proxy/dialers/postgres"
 	"github.com/bwmarrin/discordgo"
@@ -31,7 +31,7 @@ var (
 	alliance     uint32
 	corporation  uint32
 
-	psqlInfo string
+	dsn string
 )
 
 func setupEnv() bool {
@@ -77,8 +77,7 @@ func setupEnv() bool {
 		log.Fatal("Environment variable `POSTGRES_PASSWORD` is required to connect to the systems database")
 	}
 
-	psqlInfo = fmt.Sprintf("host=%s dbname=%s user=%s password=%s sslmode=disable",
-		host, dbname, user, password)
+	dsn = fmt.Sprintf("host=%s dbname=%s user=%s password=%s sslmode=disable", host, dbname, user, password)
 
 	allianceID, error := strconv.ParseUint(os.Getenv("ALLIANCE_ID"), 10, 32)
 	if error != nil {
@@ -105,7 +104,17 @@ func main() {
 		esiClient = esi.CreateClient(httpClient)
 		zkbClient = zkb.CreateClient(httpClient)
 
-		postgres, error = sql.Open("cloudsqlpostgres", psqlInfo)
+		// ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		// defer cancel()
+
+		// client, error := authenticatedClient(ctx)
+		// if error != nil {
+		// 	log.Fatal(error)
+		// }
+
+		// proxy.Init(client, nil, nil)
+
+		postgres, error = sql.Open("cloudsqlpostgres", dsn)
 		if error != nil {
 			log.Fatal(error)
 		}

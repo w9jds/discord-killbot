@@ -1,10 +1,10 @@
 package main
 
 import (
-	"killbot/pkg/esi"
-	"killbot/pkg/zkb"
+	"esi"
 	"log"
 	"time"
+	"zkb"
 )
 
 func fetch() {
