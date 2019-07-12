@@ -1,6 +1,6 @@
 FROM golang:latest as builder
 
-LABEL version="v1.17"
+LABEL version="v2.4"
 LABEL repository="https://github.com/w9jds/discord-killbot"
 LABEL homepage="https://github.com/w9jds/discord-killbot"
 LABEL maintainer="Jeremy Shore <w9jds@github.com>"
