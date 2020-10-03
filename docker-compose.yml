@@ -1,0 +1,16 @@
+version: '2'
+services:
+  redis:
+    image: killbot-integration
+    environment:
+      - REDISQ_ID=chingy-killbot-debug
+      - ALLIANCE_ID=99006117
+      - CORPORATION_ID=98293472
+      - BOT_TOKEN=NDA2NDg4Mzg2MzMzOTY2MzM2.XKRVTQ.EE12nkiAOx9HSguEKSg2dnP1IHo
+      - KILLS_CHANNEL_ID=409742816743391232
+      - INTEL_CHANNEL_ID=413092858686341130
+      - POSTGRES_HOST=new-eden-storage-a5c23:us-central1:storage
+      - POSTGRES_PORT=3306
+      - POSTGRES_DB=new_eden
+      - POSTGRES_USER=killbot
+      - POSTGRES_PASSWORD=-9m7eP%ZvhsdEh#FcE_mma!y

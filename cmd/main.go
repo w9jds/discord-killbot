@@ -1,29 +1,19 @@
 package main
 
 import (
-	"database/sql"
-	"esi"
+	"killbot/pkg/cloudsql"
+	"killbot/pkg/discord"
+
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
-	"zkb"
-
-	_ "github.com/GoogleCloudPlatform/cloudsql-proxy/proxy/dialers/postgres"
-	"github.com/bwmarrin/discordgo"
 )
 
 var (
-	httpClient *http.Client
-	esiClient  *esi.Client
-	zkbClient  *zkb.Client
-	discord    *discordgo.Session
-	postgres   *sql.DB
-
 	queueID      string
 	botToken     string
 	killsChannel string
@@ -96,42 +86,13 @@ func setupEnv() bool {
 }
 
 func main() {
-	var error error
+	var err error
 	isReady := setupEnv()
 
 	if isReady == true {
-		httpClient = &http.Client{}
-		esiClient = esi.CreateClient(httpClient)
-		zkbClient = zkb.CreateClient(httpClient)
-
-		// ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		// defer cancel()
-
-		// client, error := authenticatedClient(ctx)
-		// if error != nil {
-		// 	log.Fatal(error)
-		// }
-
-		// proxy.Init(client, nil, nil)
-
-		postgres, error = sql.Open("cloudsqlpostgres", dsn)
-		if error != nil {
-			log.Fatal(error)
-		}
-
-		defer postgres.Close()
-
-		discord, error = discordgo.New("Bot " + botToken)
-		if error != nil {
-			log.Fatal("discordgo: ", error)
-		}
-
-		error = discord.Open()
-		if error != nil {
-			log.Fatal("discordgo: ", error)
-		}
-
-		defer discord.Close()
+		aura := discord.CreateDiscordBot(botToken)
+		killbot := zkill.CreateKill
+		cloudSQL := cloudsql.ConnectCloudSQL()
 
 		fetch()
 	}
